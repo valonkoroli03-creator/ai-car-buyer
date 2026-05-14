@@ -194,8 +194,10 @@ Réponds UNIQUEMENT avec ce JSON, sans markdown:
 }
 
 // ============================================================
-// Premium analysis — full breakdown with Swiss costs
+// Premium analysis — split into 4 parallel calls to avoid Vercel timeout
 // ============================================================
+const FAST_MODEL = 'claude-haiku-4-5-20251001';
+
 export async function aiPremiumAnalysis(
   scored: ScoredListing[],
   answers: UserAnswers,
@@ -206,20 +208,12 @@ export async function aiPremiumAnalysis(
     return rest;
   });
 
-  // Annual km midpoint for fuel cost
   const kmMidpoint = answers.annualKm === '<10000' ? 8000
     : answers.annualKm === '10000-15000' ? 12500
     : answers.annualKm === '15000-25000' ? 20000
     : 30000;
 
-  const prompt = `Tu es un conseiller automobile expert SENIOR pour le marché suisse, avec expertise:
-- Coûts d'assurance auto en Suisse par canton (avec connaissance des barèmes Mobilière, Allianz, Generali, AXA, Zurich Insurance)
-- Impôts automobiles cantonaux (SAN Genève, Vaud, Zurich, etc.)
-- Marché de l'occasion suisse (AutoScout24.ch tendances)
-- Fiabilité mécanique des marques (TÜV, ADAC, Que Choisir)
-- Coûts d'entretien réels par marque en CH
-
-CONTEXTE:
+  const contextHeader = `CONTEXTE:
 Ville: ${answers.city}
 Budget: CHF ${answers.budget.toLocaleString('fr-CH')}
 Usage: ${answers.usage}
@@ -231,19 +225,24 @@ Profil: ${answers.driverProfile}
 ANNONCES (UNIQUEMENT analyser celles-ci, JAMAIS inventer):
 ${JSON.stringify(compact, null, 2)}
 
-Génère une analyse PREMIUM complète. Réponds UNIQUEMENT avec ce JSON (pas de markdown, pas de backticks):
+`;
+
+  const ids = scored.map(s => s.id);
+  const idsStr = ids.join('", "');
+
+  // ===== CALL 1: Summary + general comparison + pro comparison =====
+  const prompt1 = `${contextHeader}Génère ces 3 sections en JSON valide UNIQUEMENT (pas de markdown):
 
 {
   "finalSummary": {
     "bestChoiceId": "id de la meilleure annonce",
     "secondChoiceId": "id second choix ou null",
-    "avoidId": "id à éviter ou null si aucune",
+    "avoidId": "id à éviter ou null",
     "globalScore": 8.4,
     "recommendation": "Phrase claire commençant par 'Nous recommandons ce véhicule car...' (max 50 mots, basée sur VRAIES données)"
   },
-
   "generalComparison": [
-    {"label": "Prix", "values": {"${scored.map(s=>s.id).join('":"...","')}":"..."}},
+    {"label": "Prix", "values": {"${idsStr}": "..."}},
     {"label": "Année", "values": {...}},
     {"label": "Kilométrage", "values": {...}},
     {"label": "Motorisation", "values": {...}},
@@ -256,48 +255,64 @@ Génère une analyse PREMIUM complète. Réponds UNIQUEMENT avec ce JSON (pas de
     {"label": "Garantie", "values": {...}},
     {"label": "Propriétaires", "values": {...}}
   ],
-
   "proComparison": {
     "winnerId": "id du gagnant",
-    "winnerReason": "Phrase de 30-50 mots expliquant pourquoi cette voiture l'emporte SUR LES VRAIES données: prix, kilométrage, décote, total sur 3 ans. Cite des chiffres concrets (ex: 'écart de CHF 4'000 sur 3 ans').",
+    "winnerReason": "Phrase de 30-50 mots citant chiffres concrets (prix, km, écart 3 ans)",
     "scores": [
-      {
-        "listingId": "id de chaque annonce",
-        "value": 8.5,         /* Score 0-10 du rapport qualité/prix vs marché */
-        "maintenance": 7.8,   /* Score 0-10 de l'entretien : 10 = très peu cher, 0 = très cher */
-        "riskInverse": 8.2,   /* Score 0-10 INVERSE du risque : 10 = aucun risque, 0 = très risqué */
-        "resale": 8.0         /* Score 0-10 de la facilité de revente et conservation valeur */
-      }
+      {"listingId": "id", "value": 8.5, "maintenance": 7.8, "riskInverse": 8.2, "resale": 8.0}
     ]
-  },
+  }
+}`;
 
+  // ===== CALL 2: Engine + reliability =====
+  const prompt2 = `${contextHeader}Génère ces 2 sections en JSON valide UNIQUEMENT (pas de markdown):
+
+{
   "engineComparison": [
     {
       "listingId": "...",
-      "pros": ["3 avantages concrets du moteur"],
+      "pros": ["3 avantages concrets"],
       "cons": ["3 inconvénients concrets"],
       "drivingFeel": "Description agrément (15 mots max)",
-      "consumption": "Conso réelle estimée + commentaire",
-      "knownReliability": "Fiabilité connue de CE moteur (TÜV/ADAC)",
-      "maintenanceCost": "Coût entretien estimé en CHF",
-      "mechanicalRisk": "Risque principal du moteur",
-      "cityFit": "Note ville /10 + courte explication",
-      "highwayFit": "Note autoroute /10 + courte explication",
-      "mountainFit": "Note montagne /10 + courte explication",
-      "transmissionNote": "Note sur la boîte (auto/manuelle, double embrayage, etc.)"
+      "consumption": "Conso réelle estimée",
+      "knownReliability": "Fiabilité connue (TÜV/ADAC)",
+      "maintenanceCost": "Coût entretien estimé CHF",
+      "mechanicalRisk": "Risque principal",
+      "cityFit": "Note /10 + courte explication",
+      "highwayFit": "Note /10 + courte explication",
+      "mountainFit": "Note /10 + courte explication",
+      "transmissionNote": "Note sur la boîte"
     }
   ],
+  "reliability": [
+    {
+      "listingId": "...",
+      "strengths": ["3 points forts mécaniques"],
+      "knownIssues": ["3 problèmes typiques"],
+      "preBuyChecks": ["3-5 vérifications avant achat"],
+      "expectedRepairCosts": "Coûts pannes courantes CHF",
+      "mileageRisk": "low|medium|high",
+      "transmissionRisk": "low|medium|high",
+      "engineRisk": "low|medium|high",
+      "serviceHistoryNote": "Note historique entretien"
+    }
+  ]
+}`;
 
+  // ===== CALL 3: Swiss costs + resale =====
+  const prompt3 = `${contextHeader}Tu connais les coûts d'assurance, plaques cantonaux suisses (Mobilière, AXA, Generali). Génère ces 2 sections en JSON UNIQUEMENT (pas de markdown):
+
+{
   "swissCosts": [
     {
       "listingId": "...",
       "purchasePrice": 18900,
       "insuranceAnnualMin": 1100,
       "insuranceAnnualMax": 1700,
-      "insuranceNote": "Estimation pour ${answers.city}, profil ${answers.driverProfile}, ${answers.insurance}. Indicatif — confirmer avec assureur.",
+      "insuranceNote": "Estimation pour ${answers.city}, profil ${answers.driverProfile}, ${answers.insurance}. À confirmer avec assureur.",
       "plateAnnualMin": 400,
       "plateAnnualMax": 800,
-      "plateNote": "Impôt automobile cantonal de ${answers.city}, basé sur puissance/poids/CO2. À confirmer avec SAN.",
+      "plateNote": "Impôt automobile ${answers.city} basé sur puissance/CO2.",
       "fuelAnnual": 2400,
       "maintenanceAnnual": 800,
       "tiresAnnual": 350,
@@ -305,45 +320,34 @@ Génère une analyse PREMIUM complète. Réponds UNIQUEMENT avec ce JSON (pas de
       "totalCost3yr": 32000
     }
   ],
-
-  "optionsComparison": [
-    {
-      "listingId": "...",
-      "luxuryPacks": ["S Line", "AMG Line", etc. si présents],
-      "comfort": ["sièges chauffants", "climatisation auto", etc.],
-      "safety": ["ACC", "lane assist", etc.],
-      "technology": ["Apple CarPlay", "cockpit digital", etc.],
-      "rare": ["options rares ou différenciantes"],
-      "missing": ["options importantes ABSENTES vs concurrent"]
-    }
-  ],
-
-  "reliability": [
-    {
-      "listingId": "...",
-      "strengths": ["3 points forts mécaniques connus"],
-      "knownIssues": ["3 problèmes typiques de ce modèle/moteur"],
-      "preBuyChecks": ["3-5 vérifications spécifiques avant achat"],
-      "expectedRepairCosts": "Coûts moyens pannes courantes (CHF)",
-      "mileageRisk": "low|medium|high",
-      "transmissionRisk": "low|medium|high",
-      "engineRisk": "low|medium|high",
-      "serviceHistoryNote": "Note sur l'historique d'entretien attendu"
-    }
-  ],
-
   "resaleAnalysis": [
     {
       "listingId": "...",
       "resaleEase": "easy|moderate|hard",
-      "brandImage": "Image de la marque en CH (15 mots)",
-      "swissDemand": "Demande sur le marché suisse",
-      "expectedDepreciation": "Décote attendue 3 ans (%)",
-      "colorConfigNote": "Note sur couleur/config",
-      "engineDemand": "Cette motorisation est-elle recherchée?"
+      "brandImage": "Image marque en CH (15 mots)",
+      "swissDemand": "Demande sur marché suisse",
+      "expectedDepreciation": "Décote 3 ans (%)",
+      "colorConfigNote": "Note couleur/config",
+      "engineDemand": "Motorisation recherchée?"
+    }
+  ]
+}`;
+
+  // ===== CALL 4: Options + negotiation + final verdict =====
+  const prompt4 = `${contextHeader}Génère ces 3 sections en JSON UNIQUEMENT (pas de markdown):
+
+{
+  "optionsComparison": [
+    {
+      "listingId": "...",
+      "luxuryPacks": ["S Line, AMG Line, etc. si présents"],
+      "comfort": ["sièges chauffants, climatisation, etc."],
+      "safety": ["ACC, lane assist, etc."],
+      "technology": ["Apple CarPlay, cockpit digital, etc."],
+      "rare": ["options rares différenciantes"],
+      "missing": ["options importantes ABSENTES vs concurrent"]
     }
   ],
-
   "negotiation": [
     {
       "listingId": "...",
@@ -354,34 +358,44 @@ Génère une analyse PREMIUM complète. Réponds UNIQUEMENT avec ce JSON (pas de
       "script": "Bonjour, votre véhicule m'intéresse. Après comparaison avec le marché suisse [argument factuel km/année], je serais prêt à venir le voir rapidement si un prix autour de CHF X'XXX est envisageable. Cordialement,"
     }
   ],
-
   "finalVerdict": {
     "bestChoice": {"listingId": "...", "reason": "phrase courte"},
     "bestValue": {"listingId": "...", "reason": "phrase courte"},
     "mostReliable": {"listingId": "...", "reason": "phrase courte"},
     "mostExpensiveToRun": {"listingId": "...", "reason": "phrase courte"},
-    "avoidIfTight": {"listingId": "...", "reason": "phrase courte"} ou null
+    "avoidIfTight": {"listingId": "...", "reason": "phrase courte"}
   }
 }
 
-CONTRAINTES IMPORTANTES:
-- Toutes les estimations CH (assurance, plaques) doivent être réalistes et adaptées à ${answers.city}
-- Ne JAMAIS inventer une voiture qui n'est pas dans les annonces fournies
-- Les 'reasons' et 'recommendations' doivent citer les VRAIES données (km exacts, année exacte)
-- Pour assurance et plaques, donne toujours min-max (fourchette) et précise que c'est indicatif
-- Tous les coûts en CHF, format nombre entier`;
+CONTRAINTES: Ne JAMAIS inventer. Tous coûts en CHF entiers. Citer VRAIES données.`;
 
-  try {
+  async function callAI(prompt: string, model: string, maxTokens: number): Promise<any> {
     const res = await client.messages.create({
-      model: MODEL,
-      max_tokens: 8000,
+      model,
+      max_tokens: maxTokens,
       messages: [{ role: 'user', content: prompt }],
     });
     const txt = res.content.filter(c => c.type === 'text').map(c => (c as any).text).join('');
     const cleaned = txt.replace(/```json/gi, '').replace(/```/g, '').trim();
-    const ai = JSON.parse(cleaned) as Omit<PremiumAnalysis, keyof FreeAnalysis>;
+    return JSON.parse(cleaned);
+  }
 
-    return { ...freeAnalysis, ...ai };
+  try {
+    console.log('[AICB/premium] Lancement de 4 appels parallèles à Claude');
+    const startedAt = Date.now();
+
+    // 4 parallel calls - takes only as long as the slowest one
+    const [result1, result2, result3, result4] = await Promise.all([
+      callAI(prompt1, MODEL, 3000),         // Summary + comparison + pro — Sonnet (qualité)
+      callAI(prompt2, FAST_MODEL, 3000),    // Engine + reliability — Haiku (rapide)
+      callAI(prompt3, MODEL, 2500),         // Swiss costs + resale — Sonnet (précision)
+      callAI(prompt4, FAST_MODEL, 2500),    // Options + nego + verdict — Haiku
+    ]);
+
+    console.log('[AICB/premium] 4 appels terminés en', Date.now() - startedAt, 'ms');
+
+    const merged = { ...result1, ...result2, ...result3, ...result4 };
+    return { ...freeAnalysis, ...merged };
   } catch (err) {
     console.error('[AICB] Analyse premium IA échouée:', err);
     throw new Error("L'analyse premium a échoué. Réessayez dans un instant.");
